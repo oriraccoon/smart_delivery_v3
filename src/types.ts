@@ -16,6 +16,7 @@ export interface PlatformConfig {
   start_row: number;
   col_map: ColumnMapping;
   tracking_col: number;
+  courier_col?: number;
   filepath_pattern: string;
 }
 
@@ -39,6 +40,7 @@ export interface ProcessedOrder {
   combinedId: string;
   isMulti: boolean;
   trackingNumber?: string;
+  courierName?: string;
   multiplier?: number;
   originalOptionName: string;
   originalProductName: string;

@@ -17,7 +17,8 @@ export const PLATFORM_PRESETS: { name: string; id: string; config: Omit<Platform
         주소: 50, // AY (수취인주소)
         배송메시지: 55 // BD (배송메세지)
       },
-      tracking_col: 1,
+      tracking_col: 8, // I열 (송장번호)
+      courier_col: 7, // H열 (택배사)
       filepath_pattern: "input/스마트스토어_전체주문발주발송관리_*.xlsx"
     }
   },
@@ -38,6 +39,7 @@ export const PLATFORM_PRESETS: { name: string; id: string; config: Omit<Platform
         배송메시지: 30 // AE (배송메세지)
       },
       tracking_col: 5,
+      courier_col: 4,
       filepath_pattern: "input/DeliveryList_*.xlsx"
     }
   },
@@ -58,6 +60,7 @@ export const PLATFORM_PRESETS: { name: string; id: string; config: Omit<Platform
         배송메시지: 21 // V (배송메세지)
       },
       tracking_col: 1,
+      courier_col: 0,
       filepath_pattern: "input/주문배송관리-상품준비중-*.xlsx"
     }
   },
@@ -78,6 +81,7 @@ export const PLATFORM_PRESETS: { name: string; id: string; config: Omit<Platform
         배송메시지: 20
       },
       tracking_col: 3,
+      courier_col: 2,
       filepath_pattern: "input/ESM_Delivery_*.xlsx"
     }
   },
@@ -98,6 +102,7 @@ export const PLATFORM_PRESETS: { name: string; id: string; config: Omit<Platform
         배송메시지: 16
       },
       tracking_col: 4,
+      courier_col: 3,
       filepath_pattern: "input/11st_orders_*.xlsx"
     }
   }
@@ -120,6 +125,7 @@ export const DEFAULT_PLATFORMS: PlatformConfig[] = [
       배송메시지: 30 // AE (배송메세지)
     },
     tracking_col: 5,
+    courier_col: 4,
     filepath_pattern: "input/DeliveryList([오늘날짜]).xlsx"
   },
   {
@@ -137,7 +143,8 @@ export const DEFAULT_PLATFORMS: PlatformConfig[] = [
       주소: 50, // AY (수취인주소)
       배송메시지: 55 // BD (배송메세지)
     },
-    tracking_col: 1,
+    tracking_col: 8, // I열
+    courier_col: 7, // H열
     filepath_pattern: "input/스마트스토어_전체주문발주발송관리_[오늘날짜].xlsx"
   },
   {
@@ -156,6 +163,7 @@ export const DEFAULT_PLATFORMS: PlatformConfig[] = [
       배송메시지: 21 // V (배송메세지)
     },
     tracking_col: 1,
+    courier_col: 0,
     filepath_pattern: "input/주문배송관리-상품준비중-*-([오늘날짜]).xlsx"
   }
 ];

@@ -1003,55 +1003,174 @@ export function processTrackingUpdateWithRows(
   inputOrders: ProcessedOrder[],
   srcRows: any[][]
 ): TrackingUpdateResult {
-  const SRC_TRACK_IDX = 3;
-  const SRC_NAME_IDX = 19;
-  const SRC_ZIP_IDX = 25;
-  const SRC_PROD_IDX = 41;
-  const SRC_QTY_IDX = 42;
-  const SRC_UNIT_IDX = 43;
-  const EXTRA_START_IDX = 48;
+  if (!srcRows || srcRows.length === 0) {
+    return {
+      matchCount: 0,
+      softMatchCount: 0,
+      unfilledErrors: inputOrders.map(o => ({
+        type: 'unfilled',
+        name: o.수령인,
+        prod: o.상품명,
+        qty: String(o.수량),
+        zipCode: o.우편번호,
+        reason: "소스 파일에 데이터가 없습니다."
+      })),
+      unusedErrors: [],
+      outputOrders: inputOrders.map(o => ({ ...o }))
+    };
+  }
 
-  // 운송장 매핑 사전 구축
-  const trackingMap: { [key: string]: string[] } = {};
+  // 헤더 행 및 컬럼 인덱스 동적 감지
+  let SRC_TRACK_IDX = -1;
+  let SRC_NAME_IDX = -1;
+  let SRC_ZIP_IDX = -1;
+  let SRC_PHONE_IDX = -1;
+  let SRC_PROD_IDX = -1;
+  let SRC_QTY_IDX = -1;
+  let SRC_UNIT_IDX = -1;
+  let SRC_COURIER_IDX = -1;
+  let SRC_ADDR_IDX = -1;
+  let startDataRow = 1;
 
-  // 1행은 헤더이므로 index=1부터 시작
-  for (let i = 1; i < srcRows.length; i++) {
+  const scanLimit = Math.min(20, srcRows.length);
+  let bestScore = -1;
+
+  for (let r = 0; r < scanLimit; r++) {
+    const row = srcRows[r];
+    if (!row || row.length === 0) continue;
+
+    let localTrack = -1, localName = -1, localZip = -1, localPhone = -1;
+    let localProd = -1, localQty = -1, localUnit = -1, localCourier = -1, localAddr = -1;
+    let score = 0;
+
+    row.forEach((cell: any, colIdx: number) => {
+      const s = String(cell || "").trim().toLowerCase().replace(/\s+/g, "");
+      if (!s) return;
+
+      if (localTrack === -1 && (s.includes("송장") || s.includes("운송장") || s.includes("등기") || s.includes("waybill") || s.includes("tracking"))) {
+        localTrack = colIdx;
+        score += 10;
+      } else if (localName === -1 && (s.includes("수령인") || s.includes("수취인") || s.includes("받는사람") || s.includes("고객명") || s.includes("수화인") || s === "이름" || s === "성명" || s.includes("받는분"))) {
+        localName = colIdx;
+        score += 8;
+      } else if (localZip === -1 && (s.includes("우편번호") || s === "우편" || s.includes("zip"))) {
+        localZip = colIdx;
+        score += 6;
+      } else if (localPhone === -1 && (s.includes("전화번호") || s.includes("연락처") || s.includes("휴대폰") || s.includes("핸드폰"))) {
+        localPhone = colIdx;
+        score += 5;
+      } else if (localProd === -1 && (s.includes("상품명") || s.includes("품목명") || s.includes("품명") || s.includes("내용물") || s === "상품" || s === "품목")) {
+        localProd = colIdx;
+        score += 4;
+      } else if (localQty === -1 && (s.includes("수량") || s.includes("구매수") || s === "qty")) {
+        localQty = colIdx;
+        score += 4;
+      } else if (localUnit === -1 && (s.includes("옵션명") || s.includes("등록옵션") || s === "용량" || s === "옵션" || s === "규격")) {
+        localUnit = colIdx;
+        score += 3;
+      } else if (localCourier === -1 && (s.includes("택배사") || s.includes("배송업체") || s.includes("택배사명") || s === "택배" || s === "배송사")) {
+        localCourier = colIdx;
+        score += 3;
+      } else if (localAddr === -1 && (s.includes("주소") || s.includes("배송지"))) {
+        localAddr = colIdx;
+        score += 2;
+      }
+    });
+
+    if (score > bestScore && (localTrack !== -1 || localName !== -1)) {
+      bestScore = score;
+      SRC_TRACK_IDX = localTrack;
+      SRC_NAME_IDX = localName;
+      SRC_ZIP_IDX = localZip;
+      SRC_PHONE_IDX = localPhone;
+      SRC_PROD_IDX = localProd;
+      SRC_QTY_IDX = localQty;
+      SRC_UNIT_IDX = localUnit;
+      SRC_COURIER_IDX = localCourier;
+      SRC_ADDR_IDX = localAddr;
+      startDataRow = r + 1;
+    }
+  }
+
+  // 만약 헤더 스캔으로 찾지 못한 경우 데이터 패턴 스캔 시도 (상단 30행 스캔)
+  if (SRC_TRACK_IDX === -1 || SRC_NAME_IDX === -1) {
+    const dataScanRows = Math.min(30, srcRows.length);
+    for (let r = 0; r < dataScanRows; r++) {
+      const row = srcRows[r];
+      if (!row) continue;
+      row.forEach((cell: any, cIdx: number) => {
+        const val = String(cell || "").trim();
+        // 송장번호 패턴 (숫자/하이픈 9자리 이상)
+        if (SRC_TRACK_IDX === -1 && /^[\d-]{9,16}$/.test(val)) {
+          SRC_TRACK_IDX = cIdx;
+        }
+        // 한국어 수령인 이름 패턴 (2~4글자 한글)
+        if (SRC_NAME_IDX === -1 && /^[가-힣]{2,5}$/.test(val) && val !== "수령인" && val !== "수취인" && val !== "상품명" && val !== "배송지") {
+          SRC_NAME_IDX = cIdx;
+        }
+        // 우편번호 패턴 (5자리 숫자)
+        if (SRC_ZIP_IDX === -1 && /^\d{5}$/.test(val)) {
+          SRC_ZIP_IDX = cIdx;
+        }
+      });
+    }
+  }
+
+  // 헬퍼: 정규화 및 크리닝
+  const cleanStr = (val: any) => String(val || "").replace(/\s+/g, "").trim().toLowerCase();
+  const cleanZip = (val: any) => {
+    let z = String(val || "").replace(/[^\d]/g, "");
+    if (z.length === 4) z = "0" + z;
+    return z;
+  };
+  const cleanPhone = (val: any) => String(val || "").replace(/[^\d]/g, "");
+
+  // SourceItems 배열 구조 생성
+  interface SourceItem {
+    rawIndex: number;
+    trackingNumber: string;
+    courierName?: string;
+    name: string;
+    zip: string;
+    phone: string;
+    prod: string;
+    unit: string;
+    qty: number;
+    addr: string;
+    used: boolean;
+  }
+
+  const sourceItems: SourceItem[] = [];
+
+  for (let i = startDataRow; i < srcRows.length; i++) {
     const row = srcRows[i];
     if (!row || row.length === 0) continue;
 
-    const t = normalizeValueForMatching(row[SRC_TRACK_IDX]);
-    if (!t || t === "nan" || t === "undefined") continue;
+    const rawTrack = SRC_TRACK_IDX !== -1 ? String(row[SRC_TRACK_IDX] || "").trim() : "";
+    if (!rawTrack || rawTrack === "nan" || rawTrack === "undefined" || rawTrack === "송장번호") continue;
 
-    const n = normalizeValueForMatching(row[SRC_NAME_IDX]);
-    const z = normalizeValueForMatching(row[SRC_ZIP_IDX]);
-    const u1 = normalizeValueForMatching(row[SRC_UNIT_IDX]);
-    const p1 = normalizeValueForMatching(row[SRC_PROD_IDX]);
-    const q1 = normalizeValueForMatching(row[SRC_QTY_IDX]);
+    const name = SRC_NAME_IDX !== -1 ? cleanStr(row[SRC_NAME_IDX]) : "";
+    const zip = SRC_ZIP_IDX !== -1 ? cleanZip(row[SRC_ZIP_IDX]) : "";
+    const phone = SRC_PHONE_IDX !== -1 ? cleanPhone(row[SRC_PHONE_IDX]) : "";
+    const prod = SRC_PROD_IDX !== -1 ? cleanStr(row[SRC_PROD_IDX]) : "";
+    const unit = SRC_UNIT_IDX !== -1 ? cleanStr(row[SRC_UNIT_IDX]) : "";
+    const qty = SRC_QTY_IDX !== -1 ? (Number(row[SRC_QTY_IDX]) || 1) : 1;
+    const addr = SRC_ADDR_IDX !== -1 ? cleanStr(row[SRC_ADDR_IDX]) : "";
+    const courierName = SRC_COURIER_IDX !== -1 ? String(row[SRC_COURIER_IDX] || "").trim() : undefined;
 
-    const key1 = JSON.stringify([n, u1, p1, q1, z]);
-    if (!trackingMap[key1]) {
-      trackingMap[key1] = [];
-    }
-    trackingMap[key1].push(t);
-
-    // 추가 사은품/품목 컬럼 순회 (EXTRA_START_IDX부터 7열 단위씩 반복)
-    for (let startCol = EXTRA_START_IDX; startCol < row.length; startCol += 7) {
-      try {
-        const pEx = normalizeValueForMatching(row[startCol]);
-        const qEx = normalizeValueForMatching(row[startCol + 1]);
-        const uEx = normalizeValueForMatching(row[startCol + 2]);
-
-        if (pEx && pEx !== "nan" && pEx !== "undefined") {
-          const keyEx = JSON.stringify([n, uEx, pEx, qEx, z]);
-          if (!trackingMap[keyEx]) {
-            trackingMap[keyEx] = [];
-          }
-          trackingMap[keyEx].push(t);
-        }
-      } catch (err) {
-        break;
-      }
-    }
+    sourceItems.push({
+      rawIndex: i,
+      trackingNumber: rawTrack,
+      courierName: courierName || undefined,
+      name,
+      zip,
+      phone,
+      prod,
+      unit,
+      qty,
+      addr,
+      used: false
+    });
   }
 
   // 복제본 생성
@@ -1060,45 +1179,112 @@ export function processTrackingUpdateWithRows(
   let softMatchCount = 0;
   const unfilledErrors: MatchingError[] = [];
 
-  // 운송장 기입 루프
+  // 다단계(Multi-Pass) 스마트 매칭 실행
   outputOrders.forEach(o => {
     if (!o.수령인) return;
 
-    const targetOpt = o.originalOptionName || o.용량;
-    const targetProd = o.originalProductName || o.상품명;
+    const oName = cleanStr(o.수령인);
+    const oZip = cleanZip(o.우편번호);
+    const oPhone = cleanPhone(o.연락처);
+    const oProd = cleanStr(o.originalProductName || o.상품명);
+    const oMappedProd = cleanStr(o.상품명);
+    const oOpt = cleanStr(o.originalOptionName || o.용량);
+    const oQty = Number(o.수량) || 1;
+    const oAddr = cleanStr(o.주소);
 
-    const inKeyArr = [o.수령인, targetOpt, targetProd, String(o.수량), o.우편번호];
-    const inKeyStr = JSON.stringify([
-      normalizeValueForMatching(o.수령인),
-      normalizeValueForMatching(targetOpt),
-      normalizeValueForMatching(targetProd),
-      normalizeValueForMatching(o.수량),
-      normalizeValueForMatching(o.우편번호)
-    ]);
+    let matchedItem: SourceItem | null = null;
+    let matchType: 'exact' | 'soft' = 'exact';
 
-    let targetVal: string | null = null;
+    // Tier 1: 이름 + 우편번호/전화번호 + 수량 + 품목/옵션 완벽 대조
+    for (const item of sourceItems) {
+      if (item.used) continue;
+      if (item.name && item.name === oName) {
+        const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
+        const qtyMatch = item.qty === oQty || !item.qty;
+        const prodMatch = !item.prod || item.prod.includes(oProd) || oProd.includes(item.prod) || item.prod.includes(oMappedProd) || oMappedProd.includes(item.prod) || item.unit.includes(oOpt) || oOpt.includes(item.unit);
 
-    // 1. 완전 일치 매칭 시도
-    if (trackingMap[inKeyStr] && trackingMap[inKeyStr].length > 0) {
-      targetVal = trackingMap[inKeyStr].shift()!;
-      matchCount++;
-    } else {
-      // 2. 부분 일치(Soft Match) 시도
-      const srcKeys = Object.keys(trackingMap);
-      for (const srcKeyStr of srcKeys) {
-        const srcKeyArr = JSON.parse(srcKeyStr) as string[];
-        const normalizedInKeyArr = inKeyArr.map(normalizeValueForMatching);
-        
-        if (isSoftMatch(normalizedInKeyArr, srcKeyArr) && trackingMap[srcKeyStr].length > 0) {
-          targetVal = trackingMap[srcKeyStr].shift()!;
-          softMatchCount++;
+        if (zipOrPhoneMatch && qtyMatch && prodMatch) {
+          matchedItem = item;
+          matchType = 'exact';
           break;
         }
       }
     }
 
-    if (targetVal) {
-      o.trackingNumber = targetVal;
+    // Tier 2: 이름 + 우편번호/전화번호 + 수량 (품목명 오차 허용)
+    if (!matchedItem) {
+      for (const item of sourceItems) {
+        if (item.used) continue;
+        if (item.name && item.name === oName) {
+          const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
+          const qtyMatch = item.qty === oQty || !item.qty;
+
+          if (zipOrPhoneMatch && qtyMatch) {
+            matchedItem = item;
+            matchType = 'soft';
+            break;
+          }
+        }
+      }
+    }
+
+    // Tier 3: 이름 + 우편번호/전화번호
+    if (!matchedItem) {
+      for (const item of sourceItems) {
+        if (item.used) continue;
+        if (item.name && item.name === oName) {
+          const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
+
+          if (zipOrPhoneMatch) {
+            matchedItem = item;
+            matchType = 'soft';
+            break;
+          }
+        }
+      }
+    }
+
+    // Tier 4: 이름 + 품목/옵션/주소 일부 일치
+    if (!matchedItem) {
+      for (const item of sourceItems) {
+        if (item.used) continue;
+        if (item.name && item.name === oName) {
+          const prodMatch = (item.prod && (item.prod.includes(oProd) || oProd.includes(item.prod) || item.prod.includes(oMappedProd))) ||
+                            (item.unit && (item.unit.includes(oOpt) || oOpt.includes(item.unit))) ||
+                            (item.addr && oAddr && (item.addr.includes(oAddr.slice(0, 6)) || oAddr.includes(item.addr.slice(0, 6))));
+
+          if (prodMatch) {
+            matchedItem = item;
+            matchType = 'soft';
+            break;
+          }
+        }
+      }
+    }
+
+    // Tier 5: 수령인 이름 고유 일치 (해당 수령인이 소스파일 및 주문서에 유일하게 존재하는 경우)
+    if (!matchedItem) {
+      const candidates = sourceItems.filter(item => !item.used && item.name && item.name === oName);
+      const orderCountWithSameName = inputOrders.filter(ord => cleanStr(ord.수령인) === oName).length;
+
+      if (candidates.length === 1 && orderCountWithSameName === 1) {
+        matchedItem = candidates[0];
+        matchType = 'soft';
+      }
+    }
+
+    if (matchedItem) {
+      matchedItem.used = true;
+      o.trackingNumber = matchedItem.trackingNumber;
+      if (matchedItem.courierName) {
+        o.courierName = matchedItem.courierName;
+      }
+
+      if (matchType === 'exact') {
+        matchCount++;
+      } else {
+        softMatchCount++;
+      }
     } else {
       unfilledErrors.push({
         type: 'unfilled',
@@ -1106,25 +1292,22 @@ export function processTrackingUpdateWithRows(
         prod: o.상품명,
         qty: String(o.수량),
         zipCode: o.우편번호,
-        reason: "소스파일 내 정보 부재 또는 수량/우편번호 불일치"
+        reason: "소스파일 내 정보 부재 또는 수량/우편번호/품목 불일치"
       });
     }
   });
 
-  // 3. 미사용 송장 탐색
+  // 미사용 운송장 탐색
   const unusedErrors: MatchingError[] = [];
-  Object.entries(trackingMap).forEach(([keyStr, list]) => {
-    if (list.length > 0) {
-      const [name, unit, prod, qty, zip] = JSON.parse(keyStr) as string[];
-      list.forEach(() => {
-        unusedErrors.push({
-          type: 'unused',
-          name,
-          prod,
-          qty,
-          zipCode: zip,
-          reason: "취소 주문이거나 인풋 파일에서 이미 제외된 항목"
-        });
+  sourceItems.forEach(item => {
+    if (!item.used) {
+      unusedErrors.push({
+        type: 'unused',
+        name: item.name || "알수없음",
+        prod: item.prod || item.unit || "알수없음",
+        qty: String(item.qty),
+        zipCode: item.zip || "알수없음",
+        reason: "취소 주문이거나 인풋 파일에서 이미 제외된 항목"
       });
     }
   });
@@ -1175,72 +1358,157 @@ export async function processTrackingUpdate(
   });
 }
 
-
-
-// 최종 운송장이 채워진 엑셀 파일 내보내기 (중복 제거 포함)
+// 최종 운송장이 채워진 엑셀 파일 내보내기 (원본 양식, 노란 배경, 파란 헤더 100% 보존)
 export async function exportFinalTrackingExcel(
   orders: ProcessedOrder[],
   originalRows: any[][],
   platform: PlatformConfig,
-  outputFileName?: string
+  outputFileName?: string,
+  originalFileOrBuffer?: File | ArrayBuffer | Uint8Array,
+  defaultCourierName: string = "한진택배"
 ): Promise<void> {
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('최종송장반영');
+  let ws: ExcelJS.Worksheet | undefined;
+  let loadedFromOriginal = false;
 
-  // 원본 엑셀 행들을 그대로 복사하면서, tracking_col 부분에만 송장번호 기입
-  // 파이썬 로직에서는 중복 주문 ID가 있을 때 첫 번째 것만 남기고 삭제했습니다.
-  // 이와 유사하게 중복 오더를 필터링합니다. (A열 id 등을 기준으로)
-  
-  const seenIds = new Set<string>();
-  const rowsToSave: any[][] = [];
+  if (originalFileOrBuffer) {
+    try {
+      let buffer: ArrayBuffer;
+      if (originalFileOrBuffer instanceof File) {
+        buffer = await originalFileOrBuffer.arrayBuffer();
+      } else if (originalFileOrBuffer instanceof Uint8Array) {
+        buffer = originalFileOrBuffer.buffer.slice(
+          originalFileOrBuffer.byteOffset,
+          originalFileOrBuffer.byteOffset + originalFileOrBuffer.byteLength
+        ) as ArrayBuffer;
+      } else {
+        buffer = originalFileOrBuffer;
+      }
 
-  // 헤더 보존
-  const startRow = platform.start_row;
-  for (let r = 0; r < startRow; r++) {
-    rowsToSave.push(originalRows[r] || []);
+      await wb.xlsx.load(buffer);
+      
+      let bestWs: ExcelJS.Worksheet | undefined = wb.worksheets[0];
+      let maxScore = -1;
+
+      wb.worksheets.forEach(sheet => {
+        if (!sheet) return;
+        let score = 0;
+        const sheetName = (sheet.name || "").toLowerCase();
+        if (sheetName.includes("발송") || sheetName.includes("주문") || sheetName.includes("delivery") || sheetName.includes("sheet1")) {
+          score += 5;
+        }
+        
+        const scanRows = Math.min(15, sheet.rowCount || 15);
+        for (let r = 1; r <= scanRows; r++) {
+          const rowVal = sheet.getRow(r).values;
+          if (Array.isArray(rowVal)) {
+            const rowStr = rowVal.map(v => String(v || "")).join(" ").toLowerCase();
+            if (rowStr.includes("주문번호")) score += 10;
+            if (rowStr.includes("수취인명") || rowStr.includes("수령인") || rowStr.includes("수취인")) score += 8;
+            if (rowStr.includes("상품명")) score += 5;
+            if (rowStr.includes("송장번호") || rowStr.includes("운송장")) score += 10;
+            if (rowStr.includes("택배사")) score += 5;
+          }
+        }
+
+        if (score > maxScore) {
+          maxScore = score;
+          bestWs = sheet;
+        }
+      });
+
+      ws = bestWs;
+      if (ws) {
+        loadedFromOriginal = true;
+      }
+    } catch (e) {
+      console.warn("원본 엑셀 템플릿 로드 실패, 기본 방식 사용:", e);
+    }
   }
 
-  // 데이터 가공 및 중복 처리
-  orders.forEach(o => {
-    const rawIdx = Number(o.id);
-    const originalRow = [...(originalRows[rawIdx] || [])];
-    
-    // 첫 열(ID 또는 주문번호) 추출
-    const orderId = String(originalRow[0] || "").trim();
-    
-    if (orderId) {
-      if (seenIds.has(orderId)) {
-        // 이미 본 주문ID라면 중복으로 판단하여 스킵 (파이썬 rows_to_delete 로직)
-        return;
-      }
-      seenIds.add(orderId);
-    }
+  // 송장번호 열 및 택배사 열 결정 (플랫폼 설정값 1순위 절대 기준)
+  const trackingColIdx = platform.tracking_col !== undefined ? (platform.tracking_col + 1) : 9;
+  const courierColIdx = platform.courier_col !== undefined ? (platform.courier_col + 1) : undefined;
 
-    // 운송장 입력할 열 (tracking_col)에 송장 번호 기입
-    // 0-based index이므로 tracking_col번째에 할당
-    if (o.trackingNumber) {
-      originalRow[platform.tracking_col] = o.trackingNumber;
-    }
-    
-    rowsToSave.push(originalRow);
-  });
-
-  // ExcelJS에 데이터 쓰기
-  rowsToSave.forEach(row => {
-    ws.addRow(row);
-  });
-
-  // 셀 너비 가볍게 자동 정렬
-  ws.columns.forEach(col => {
-    let maxLen = 0;
-    col.eachCell!({ includeEmpty: false }, (cell) => {
-      if (cell.value) {
-        const length = String(cell.value).length;
-        if (length > maxLen) maxLen = length;
+  if (loadedFromOriginal && ws) {
+    // orders에 존재하는 rawIdx와 { trackingNumber, courierName } 맵 생성
+    const trackingByRawIdx = new Map<number, { trackingNumber: string; courierName?: string }>();
+    orders.forEach(o => {
+      const rawIdx = Number(o.id);
+      if (!isNaN(rawIdx) && o.trackingNumber) {
+        trackingByRawIdx.set(rawIdx, {
+          trackingNumber: o.trackingNumber,
+          courierName: o.courierName
+        });
       }
     });
-    col.width = Math.max(10, maxLen + 1.5);
-  });
+
+    // trackingByRawIdx에 존재하는 모든 0-based rawIdx 항목에 대해 직접 1-based 행(rawIdx + 1)을 얻어 값 기입
+    trackingByRawIdx.forEach((item, rawIdx) => {
+      const rowNum = rawIdx + 1; // 1-based index
+      const row = ws!.getRow(rowNum);
+
+      if (item.trackingNumber && trackingColIdx) {
+        const cell = row.getCell(trackingColIdx);
+        cell.value = item.trackingNumber;
+      }
+      const courierToSet = item.courierName || defaultCourierName;
+      if (courierToSet && courierColIdx) {
+        const courierCell = row.getCell(courierColIdx);
+        courierCell.value = courierToSet;
+      }
+      row.commit();
+    });
+  } else {
+    // 원본 파일을 로드하지 못한 경우의 폴백 생성기
+    ws = wb.addWorksheet('최종송장반영');
+    const seenIds = new Set<string>();
+    const rowsToSave: any[][] = [];
+
+    const startRow = platform.start_row;
+    for (let r = 0; r < startRow; r++) {
+      rowsToSave.push(originalRows[r] || []);
+    }
+
+    orders.forEach(o => {
+      const rawIdx = Number(o.id);
+      const originalRow = [...(originalRows[rawIdx] || [])];
+      
+      const orderId = String(originalRow[0] || "").trim();
+      
+      if (orderId) {
+        if (seenIds.has(orderId)) {
+          return;
+        }
+        seenIds.add(orderId);
+      }
+
+      if (o.trackingNumber && trackingColIdx) {
+        originalRow[trackingColIdx - 1] = o.trackingNumber;
+      }
+      const courierToSet = o.courierName || defaultCourierName;
+      if (courierToSet && courierColIdx) {
+        originalRow[courierColIdx - 1] = courierToSet;
+      }
+      
+      rowsToSave.push(originalRow);
+    });
+
+    rowsToSave.forEach(row => {
+      ws!.addRow(row);
+    });
+
+    ws.columns.forEach(col => {
+      let maxLen = 0;
+      col.eachCell!({ includeEmpty: false }, (cell) => {
+        if (cell.value) {
+          const length = String(cell.value).length;
+          if (length > maxLen) maxLen = length;
+        }
+      });
+      col.width = Math.max(10, maxLen + 1.5);
+    });
+  }
 
   const buffer = await wb.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

@@ -62,6 +62,7 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
   // 1-based / 알파벳 열 입력을 위한 로컬 상태
   const [startRowInput, setStartRowInput] = useState<string>('');
   const [trackingColInput, setTrackingColInput] = useState<string>('');
+  const [courierColInput, setCourierColInput] = useState<string>('');
   const [colMapInputs, setColMapInputs] = useState<Record<string, string>>({});
 
   // 플랫폼 선택 시 로컬 입력 상태 동기화 (기본적으로 읽기 쉬운 알파벳 문자로 노출)
@@ -69,6 +70,7 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
     if (editingPlatform) {
       setStartRowInput(String(editingPlatform.start_row + 1));
       setTrackingColInput(colNumToLetter(editingPlatform.tracking_col + 1));
+      setCourierColInput(editingPlatform.courier_col !== undefined ? colNumToLetter(editingPlatform.courier_col + 1) : '');
       
       const newColMapInputs: Record<string, string> = {};
       Object.entries(editingPlatform.col_map).forEach(([field, val]) => {
@@ -78,6 +80,7 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
     } else {
       setStartRowInput('');
       setTrackingColInput('');
+      setCourierColInput('');
       setColMapInputs({});
     }
   }, [editingPlatform?.id]);
@@ -94,6 +97,16 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
     setTrackingColInput(val);
     const { parsedZeroBased } = getColumnPreview(val);
     setEditingPlatform(prev => prev ? { ...prev, tracking_col: parsedZeroBased } : null);
+  };
+
+  const handleCourierColChange = (val: string) => {
+    setCourierColInput(val);
+    if (!val.trim()) {
+      setEditingPlatform(prev => prev ? { ...prev, courier_col: undefined } : null);
+    } else {
+      const { parsedZeroBased } = getColumnPreview(val);
+      setEditingPlatform(prev => prev ? { ...prev, courier_col: parsedZeroBased } : null);
+    }
   };
 
   const handleColMapChange = (field: string, val: string) => {
@@ -417,12 +430,33 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
                       type="text"
                       value={trackingColInput}
                       onChange={(e) => handleTrackingColChange(e.target.value)}
-                      placeholder="예: B 또는 2"
+                      placeholder="예: I 또는 9"
                       className="w-full text-sm border border-slate-200 rounded-lg p-2 pr-16 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 font-mono"
                     />
                     {getColumnPreview(trackingColInput).displayPreview && (
                       <span className="absolute right-3 text-xs bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-mono font-medium pointer-events-none">
                         {getColumnPreview(trackingColInput).displayPreview}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1 flex items-center justify-between">
+                    <span>택배사명 기입할 열 (알파벳 또는 숫자)</span>
+                    <span className="text-[10px] text-slate-400 font-normal">H, E... 또는 없으면 빈칸</span>
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                      type="text"
+                      value={courierColInput}
+                      onChange={(e) => handleCourierColChange(e.target.value)}
+                      placeholder="예: H 또는 8"
+                      className="w-full text-sm border border-slate-200 rounded-lg p-2 pr-16 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 font-mono"
+                    />
+                    {getColumnPreview(courierColInput).displayPreview && (
+                      <span className="absolute right-3 text-xs bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-mono font-medium pointer-events-none">
+                        {getColumnPreview(courierColInput).displayPreview}
                       </span>
                     )}
                   </div>

@@ -17,7 +17,8 @@ import {
   Trash2,
   RefreshCw,
   Sparkles,
-  Layers
+  Layers,
+  Truck
 } from 'lucide-react';
 
 import { PlatformConfig, ProductMapping, ProcessedOrder, MatchingError } from './types';
@@ -102,6 +103,8 @@ export default function App() {
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [isProcessingTracking, setIsProcessingTracking] = useState(false);
   const [trackingResult, setTrackingResult] = useState<any>(null);
+  const [selectedCourier, setSelectedCourier] = useState<string>("한진택배");
+  const [customCourier, setCustomCourier] = useState<string>("");
 
   // 비밀번호 잠금 에러 상태
   const [passwordErrorFile, setPasswordErrorFile] = useState<'order' | 'tracking' | null>(null);
@@ -258,6 +261,8 @@ export default function App() {
     try {
       const parsedFilesList: {
         fileName: string;
+        file?: File;
+        originalBuffer?: any;
         detectedPlatform: PlatformConfig;
         orders: ProcessedOrder[];
         rawRows: any[][];
@@ -284,6 +289,8 @@ export default function App() {
           
           parsedFilesList.push({
             fileName: file.name,
+            file: file,
+            originalBuffer: cacheToUse[file.name] || null,
             detectedPlatform: platform,
             orders: result.orders.map(order => ({
               ...order,
@@ -593,10 +600,11 @@ export default function App() {
       if (!parsedFiles || parsedFiles.length === 0) return;
 
       let downloadedCount = 0;
+      const courierToUse = selectedCourier === "custom" ? customCourier.trim() || "한진택배" : selectedCourier;
 
       for (const pf of parsedFiles) {
         const fileOrders = trackingResult.outputOrders.filter(
-          (o: any) => o.sourceFileName === pf.fileName
+          (o: any) => !o.sourceFileName || o.sourceFileName === pf.fileName || parsedFiles.length === 1
         );
 
         if (fileOrders.length > 0) {
@@ -607,7 +615,9 @@ export default function App() {
             fileOrders,
             pf.rawRows,
             pf.detectedPlatform,
-            customName
+            customName,
+            pf.originalBuffer || pf.file,
+            courierToUse
           );
           downloadedCount++;
         }
@@ -1218,6 +1228,42 @@ export default function App() {
                   <p className="text-xs text-slate-500 leading-relaxed">
                     CJ대한통운, 롯데, 한진 등 배송사 시스템으로부터 출력된 '송장정보 엑셀(재출력관리 등)'을 업로드하세요. 수령인, 상품명, 수량, 우편번호를 교차 대조하여 원래 주문서 엑셀에 운송장을 자동으로 기입합니다.
                   </p>
+
+                  {/* 택배사 설정 영역 */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                    <label className="block text-xs font-bold text-slate-700 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Truck className="w-4 h-4 text-indigo-600" />
+                        기본 택배사 선택 / 입력
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-normal">운송장 소스파일에 택배사가 있으면 자동 반영됩니다</span>
+                    </label>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <select
+                        value={selectedCourier}
+                        onChange={(e) => setSelectedCourier(e.target.value)}
+                        className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      >
+                        <option value="한진택배">한진택배</option>
+                        <option value="CJ대한통운">CJ대한통운</option>
+                        <option value="로젠택배">로젠택배</option>
+                        <option value="우체국택배">우체국택배</option>
+                        <option value="롯데택배">롯데택배</option>
+                        <option value="경동화물">경동화물</option>
+                        <option value="대신화물">대신화물</option>
+                        <option value="custom">직접 입력...</option>
+                      </select>
+                      {selectedCourier === "custom" && (
+                        <input
+                          type="text"
+                          placeholder="택배사명 직접 입력 (예: 한진택배)"
+                          value={customCourier}
+                          onChange={(e) => setCustomCourier(e.target.value)}
+                          className="text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 flex-1"
+                        />
+                      )}
+                    </div>
+                  </div>
 
                   {/* 드롭존 영역 */}
                   <div className="relative border-2 border-dashed border-slate-200 hover:border-indigo-500 rounded-xl p-6 bg-slate-50 text-center transition cursor-pointer">
