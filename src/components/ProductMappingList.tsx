@@ -8,7 +8,7 @@ interface ProductMappingListProps {
   defaultRawNames?: string[];
 }
 
-export default function ProductMappingList({ mappings, onChange, defaultRawNames = [] }: ProductMappingListProps) {
+export default function ProductMappingList({ mappings, onChange }: ProductMappingListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [newRawName, setNewRawName] = useState('');
   const [newMappedName, setNewMappedName] = useState('');
@@ -16,37 +16,33 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
   const [editRawName, setEditRawName] = useState('');
   const [editMappedName, setEditMappedName] = useState('');
   
-  // 개별 삭제 확인용 상태
-  const [deletingRawName, setDeletingRawName] = useState<string | null>(null);
-  // 에러 알림 상태 (alert 대치)
+  // 단일 항목 삭제 확인 모달용 상태
+  const [singleDeleteTarget, setSingleDeleteTarget] = useState<string | null>(null);
+  // 에러 알림 상태
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // 벌크 편집 모드
   const [showBulkMode, setShowBulkMode] = useState(false);
   const [bulkText, setBulkText] = useState('');
 
-  // 벌크 가져오기 확인 팝업 상태 (confirm 대치)
+  // 벌크 가져오기 확인 팝업 상태
   const [bulkImportConfirm, setBulkImportConfirm] = useState<{
     isOpen: boolean;
     parsed: ProductMapping[];
   } | null>(null);
 
-  // 다중 선택 상태 추가
+  // 다중 선택 상태
   const [selectedRawNames, setSelectedRawNames] = useState<Set<string>>(new Set());
 
-  // 필터 상태 추가 ('all' | 'hasMapped' | 'noMapped')
+  // 필터 상태 ('all' | 'hasMapped' | 'noMapped')
   const [filterType, setFilterType] = useState<'all' | 'hasMapped' | 'noMapped'>('all');
 
-  // 삭제 확인 모달 상태
+  // 일괄/선택 삭제 확인 모달 상태
   const [showDeleteModal, setShowDeleteModal] = useState<{
     isOpen: boolean;
     type: 'selected' | 'all';
     count: number;
   } | null>(null);
-
-  const isDefaultMapping = (rawName: string) => {
-    return defaultRawNames.includes(rawName);
-  };
 
   // 매핑 목록 필터링
   const filteredMappings = mappings.filter(item => {
@@ -87,22 +83,21 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
     setNewMappedName('');
   };
 
-  // 개별 삭제 처리
+  // 단일 항목 삭제 실행
   const executeDelete = (rawName: string) => {
-    // 다중 선택 상태에서도 해당 항목을 제거해줌
     const nextSelected = new Set(selectedRawNames);
     nextSelected.delete(rawName);
     setSelectedRawNames(nextSelected);
 
     onChange(mappings.filter(m => m.rawName !== rawName));
-    setDeletingRawName(null);
+    setSingleDeleteTarget(null);
   };
 
   // 전체 선택 / 해제
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      const nonDefault = filteredMappings.filter(m => !isDefaultMapping(m.rawName)).map(m => m.rawName);
-      setSelectedRawNames(new Set(nonDefault));
+      const allNames = filteredMappings.map(m => m.rawName);
+      setSelectedRawNames(new Set(allNames));
     } else {
       setSelectedRawNames(new Set());
     }
@@ -110,7 +105,6 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
 
   // 개별 행 선택 / 해제
   const handleSelectRow = (rawName: string, checked: boolean) => {
-    if (isDefaultMapping(rawName)) return; // 기본 품목은 선택 금지
     const next = new Set(selectedRawNames);
     if (checked) {
       next.add(rawName);
@@ -122,8 +116,7 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
 
   // 선택 삭제 실행
   const executeDeleteSelected = () => {
-    // 선택된 항목만 제거 (선택되지 않았거나 기본 품목인 것은 유지)
-    const nextMappings = mappings.filter(m => !selectedRawNames.has(m.rawName) || isDefaultMapping(m.rawName));
+    const nextMappings = mappings.filter(m => !selectedRawNames.has(m.rawName));
     onChange(nextMappings);
     setSelectedRawNames(new Set());
     setShowDeleteModal(null);
@@ -131,9 +124,7 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
 
   // 전체 삭제 실행
   const executeDeleteAll = () => {
-    // 기본 품목 규칙만 남기고 사용자가 임의로 추가한 규칙만 전체 삭제
-    const nextMappings = mappings.filter(m => isDefaultMapping(m.rawName));
-    onChange(nextMappings);
+    onChange([]);
     setSelectedRawNames(new Set());
     setShowDeleteModal(null);
   };
@@ -209,15 +200,7 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
     const { parsed } = bulkImportConfirm;
 
     if (overwrite) {
-      // 3번 배제 조건: 덮어쓰더라도 디폴트 항목은 반드시 보존해야 합니다.
-      const defaultMappings = mappings.filter(m => isDefaultMapping(m.rawName));
-      const merged = [...defaultMappings];
-      parsed.forEach(p => {
-        if (!merged.some(m => m.rawName === p.rawName)) {
-          merged.push(p);
-        }
-      });
-      onChange(merged);
+      onChange(parsed);
     } else {
       // 중복 없이 이어붙이기
       const merged = [...mappings];
@@ -278,17 +261,46 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
         </div>
       )}
 
-      {/* 삭제 재확인 모달 */}
+      {/* 단일 항목 삭제 확인 모달 팝업 */}
+      {singleDeleteTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6 space-y-4 border border-slate-100">
+            <h3 className="font-bold text-slate-800 text-base flex items-center gap-1.5 text-rose-600">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              대치 규칙 삭제
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              '<strong className="text-slate-800">{singleDeleteTarget}</strong>' 대치 규칙을 삭제하시겠습니까?
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setSingleDeleteTarget(null)}
+                className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition"
+              >
+                취소
+              </button>
+              <button
+                onClick={() => executeDelete(singleDeleteTarget)}
+                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold transition shadow-md"
+              >
+                삭제
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 일괄/전체 삭제 재확인 모달 */}
       {showDeleteModal?.isOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-fade-in">
           <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6 space-y-4 border border-slate-100">
             <h3 className="font-bold text-slate-800 text-base flex items-center gap-1.5 text-rose-600">
               <AlertTriangle className="w-5 h-5 shrink-0" />
-              {showDeleteModal.type === 'all' ? '추가된 대치 규칙 전체 삭제' : '선택한 대치 규칙 삭제'}
+              {showDeleteModal.type === 'all' ? '전체 대치 규칙 삭제' : '선택한 대치 규칙 삭제'}
             </h3>
             <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
               {showDeleteModal.type === 'all' 
-                ? '주의! 기본 등록된 품목을 제외하고, 새로 직접 추가한 대치 규칙만 영구적으로 모두 삭제됩니다. 계속 진행하시겠습니까?'
+                ? `주의! 현재 등록된 전체 ${mappings.length}개의 대치 규칙을 삭제하시겠습니까?`
                 : `선택하신 ${showDeleteModal.count}개의 대치 규칙을 일괄 삭제하시겠습니까?`
               }
             </p>
@@ -324,7 +336,7 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
         <div className="flex gap-2">
           <button
             onClick={generateBulkText}
-            className="flex items-center justify-center gap-2 px-3.5 py-2 border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-lg text-sm font-medium transition"
+            className="flex items-center justify-center gap-2 px-3.5 py-2 border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-lg text-xs font-medium transition"
           >
             <FileText className="w-4 h-4" />
             텍스트 대량 가져오기/내보내기
@@ -454,7 +466,6 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
                   value={filterType}
                   onChange={(e) => {
                     setFilterType(e.target.value as any);
-                    // 필터를 바꾸면 선택상태도 해제하여 꼬이지 않게 함
                     setSelectedRawNames(new Set());
                   }}
                   className="text-xs border-none bg-transparent focus:ring-0 text-slate-600 font-semibold py-0 pl-0 pr-6 outline-none"
@@ -477,13 +488,13 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
               )}
 
               {/* 전체 삭제 버튼 */}
-              {mappings.filter(m => !isDefaultMapping(m.rawName)).length > 0 && (
+              {mappings.length > 0 && (
                 <button
-                  onClick={() => setShowDeleteModal({ isOpen: true, type: 'all', count: mappings.filter(m => !isDefaultMapping(m.rawName)).length })}
+                  onClick={() => setShowDeleteModal({ isOpen: true, type: 'all', count: mappings.length })}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 rounded-lg text-xs font-semibold transition cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  추가 규칙 전체 삭제
+                  전체 삭제
                 </button>
               )}
             </div>
@@ -517,7 +528,7 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
                       </td>
                     </tr>
                   ) : (
-                    filteredMappings.map((item, idx) => {
+                    filteredMappings.map((item) => {
                       const globalIdx = mappings.findIndex(m => m.rawName === item.rawName);
                       const isEditing = editingIndex === globalIdx;
                       const isSelected = selectedRawNames.has(item.rawName);
@@ -528,20 +539,12 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
                           className={`hover:bg-slate-50/50 transition-colors ${isSelected ? 'bg-indigo-50/20' : ''}`}
                         >
                           <td className="px-4 py-3 text-center">
-                            {!isDefaultMapping(item.rawName) ? (
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={(e) => handleSelectRow(item.rawName, e.target.checked)}
-                                className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
-                              />
-                            ) : (
-                              <div className="flex justify-center" title="기본 정제 품목은 선택/삭제할 수 없습니다.">
-                                <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-semibold scale-90">
-                                  기본
-                                </span>
-                              </div>
-                            )}
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => handleSelectRow(item.rawName, e.target.checked)}
+                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                            />
                           </td>
                           <td className="px-4 py-3 font-medium text-slate-800">
                             {isEditing ? (
@@ -585,44 +588,24 @@ export default function ProductMappingList({ mappings, onChange, defaultRawNames
                                 <X className="w-4 h-4" />
                               </button>
                             </div>
-                          ) : deletingRawName === item.rawName ? (
-                            <div className="flex items-center justify-end gap-1.5 animate-fade-in">
-                              <span className="text-[10px] text-rose-500 font-bold whitespace-nowrap">삭제?</span>
-                              <button
-                                onClick={() => executeDelete(item.rawName)}
-                                className="px-1.5 py-0.5 text-[10px] text-white bg-rose-500 hover:bg-rose-600 rounded font-bold"
-                              >
-                                예
-                              </button>
-                              <button
-                                onClick={() => setDeletingRawName(null)}
-                                className="px-1.5 py-0.5 text-[10px] text-slate-500 bg-slate-100 hover:bg-slate-200 rounded font-bold"
-                              >
-                                아니오
-                              </button>
-                            </div>
                           ) : (
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 onClick={() => startEdit(globalIdx, item)}
                                 className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-50 rounded"
+                                title="수정"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
-                              {!isDefaultMapping(item.rawName) ? (
-                                <button
-                                  onClick={() => setDeletingRawName(item.rawName)}
-                                  className="p-1 text-slate-400 hover:text-rose-500 hover:bg-slate-50 rounded"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              ) : (
-                                <div className="p-1 text-slate-200 cursor-not-allowed" title="기본 품목 규칙은 삭제할 수 없습니다.">
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </div>
-                              )}
+                              <button
+                                onClick={() => setSingleDeleteTarget(item.rawName)}
+                                className="p-1 text-slate-400 hover:text-rose-500 hover:bg-slate-50 rounded"
+                                title="삭제"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             </div>
-                        )}
+                          )}
                       </td>
                     </tr>
                   );

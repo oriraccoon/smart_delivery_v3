@@ -18,10 +18,11 @@ import {
   RefreshCw,
   Sparkles,
   Layers,
-  Truck
+  Truck,
+  Eye
 } from 'lucide-react';
 
-import { PlatformConfig, ProductMapping, ProcessedOrder, MatchingError } from './types';
+import { PlatformConfig, ProductMapping, ProcessedOrder, MatchingError, ValidationIssue } from './types';
 import { DEFAULT_PLATFORMS, DEFAULT_PRODUCT_MAPPINGS } from './utils/defaultData';
 import { 
   parseAndProcessOrderExcel, 
@@ -31,12 +32,15 @@ import {
   processTrackingUpdate,
   processTrackingUpdateWithRows,
   exportFinalTrackingExcel,
-  findBestOrderSheet
+  findBestOrderSheet,
+  sortUnitsSmart
 } from './utils/excelProcessor';
 
 import PlatformSettings from './components/PlatformSettings';
 import ProductMappingList from './components/ProductMappingList';
 import WaybillReportDashboard from './components/WaybillReportDashboard';
+import ExcelValidationDashboard from './components/ExcelValidationDashboard';
+import ExcelPreviewModal, { ExcelPreviewFile } from './components/ExcelPreviewModal';
 
 export default function App() {
   // ----------------------------------------------------
@@ -142,29 +146,27 @@ export default function App() {
     });
   };
 
-  // 최초 1회 백엔드 서버(품목리스트.txt)로부터 대치 사전을 불러오기
+  const isFirstSyncSkippedRef = React.useRef(false);
+
+  // 최초 1회 백엔드 서버(품목리스트_추가.txt)로부터 대치 사전을 불러오기
   useEffect(() => {
     fetch('/api/mappings')
       .then(res => res.json())
       .then(data => {
         if (data.success && Array.isArray(data.mappings)) {
-          // 서버에서 불러온 데이터가 있을 경우 사용
           setProductMappings(data.mappings);
           if (Array.isArray(data.defaultRawNames)) {
             setDefaultRawNames(data.defaultRawNames);
           }
         } else {
-          // 실패 시 로컬 스토리지 또는 하드코딩 기본값으로 대체
-          const saved = localStorage.getItem('s_waybill_mappings');
-          setProductMappings(saved ? JSON.parse(saved) : DEFAULT_PRODUCT_MAPPINGS);
+          setProductMappings(DEFAULT_PRODUCT_MAPPINGS);
           setDefaultRawNames(DEFAULT_PRODUCT_MAPPINGS.map(m => m.rawName));
         }
         setIsMappingsLoaded(true);
       })
       .catch(err => {
-        console.error("서버 대치 규칙 조회 실패, 로컬 데이터 사용:", err);
-        const saved = localStorage.getItem('s_waybill_mappings');
-        setProductMappings(saved ? JSON.parse(saved) : DEFAULT_PRODUCT_MAPPINGS);
+        console.error("서버 대치 규칙 조회 실패:", err);
+        setProductMappings(DEFAULT_PRODUCT_MAPPINGS);
         setDefaultRawNames(DEFAULT_PRODUCT_MAPPINGS.map(m => m.rawName));
         setIsMappingsLoaded(true);
       });
@@ -175,12 +177,17 @@ export default function App() {
     localStorage.setItem('s_waybill_platforms', JSON.stringify(platforms));
   }, [platforms]);
 
+  // 대치 목록 변경 시 품목리스트_추가.txt 파일에만 실시간 보존 동기화
   useEffect(() => {
     if (!isMappingsLoaded) return; // 최초 비동기 로드 완료 전에는 서버에 덮어쓰기 동기화 금지
 
-    localStorage.setItem('s_waybill_mappings', JSON.stringify(productMappings));
+    // 첫 번째 로드 직후 렌더링 시에는 서버 sync를 건너뜀 (서버 데이터를 방금 받았으므로)
+    if (!isFirstSyncSkippedRef.current) {
+      isFirstSyncSkippedRef.current = true;
+      return;
+    }
 
-    // 서버 동기화 요청 (/api/mappings/sync)
+    // 서버 동기화 요청 (/api/mappings/sync -> 품목리스트_추가.txt 전용 저장)
     fetch('/api/mappings/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -268,6 +275,7 @@ export default function App() {
         rawRows: any[][];
         headers: any[];
         newRawItems: string[];
+        validationIssues?: ValidationIssue[];
       }[] = [];
 
       for (const file of files) {
@@ -300,7 +308,8 @@ export default function App() {
             })),
             rawRows: result.rawRows,
             headers: result.headers,
-            newRawItems: result.newRawItems
+            newRawItems: result.newRawItems,
+            validationIssues: result.validationIssues || []
           });
         } catch (err: any) {
           if (err.message === "PASSWORD_PROTECTED") {
@@ -360,16 +369,22 @@ export default function App() {
 
       const sortedCombinedOrders = [...multiOrders, ...singleOrders];
 
-      // Extract unified new raw unique items
+      // Extract unified new raw unique items & validation issues
       const allNewItemsSet = new Set<string>();
+      const allValidationIssues: ValidationIssue[] = [];
+
       parsedFilesList.forEach(pf => {
         pf.newRawItems.forEach(item => allNewItemsSet.add(item));
+        if (pf.validationIssues && pf.validationIssues.length > 0) {
+          allValidationIssues.push(...pf.validationIssues);
+        }
       });
       const uniqueNewRawItems = Array.from(allNewItemsSet);
 
       setOrderParseResult({
         orders: sortedCombinedOrders,
         newRawItems: uniqueNewRawItems,
+        validationIssues: allValidationIssues,
         parsedFiles: parsedFilesList
       });
 
@@ -453,6 +468,190 @@ export default function App() {
     }
   };
 
+  // 엑셀 미리보기 모달 상태
+  const [previewModal, setPreviewModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    subtitle?: string;
+    files: ExcelPreviewFile[];
+    onDownloadAll?: () => void;
+    downloadAllButtonText?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    files: []
+  });
+
+  // 1단계 가공된 주문 데이터 미리보기 (실제 생성되는 2개 파일 및 각각의 시트와 1:1 완벽 대조)
+  const handlePreviewStep1Excel = () => {
+    if (!orderParseResult || !orderParseResult.orders || orderParseResult.orders.length === 0) {
+      showNotification('info', "미리볼 주문 가공 데이터가 없습니다. 먼저 1단계 주문 파일을 불러와주세요.");
+      return;
+    }
+
+    const orders: ProcessedOrder[] = orderParseResult.orders;
+
+    // --- [파일 1: 1. 요약보고서.xlsx] ---
+    // 시트 1: 상세내역 (용량, 상품명, 수량, 주문자)
+    const summarySheet1Columns = ["용량", "상품명", "수량", "주문자"];
+    const summarySheet1Rows = orders.map(o => [
+      o.originalOptionName || "",
+      o.originalProductName || "",
+      o.수량,
+      o.주문자 || ""
+    ]);
+
+    // 시트 2: 상품준비요약 (상품 분류 (행 레이블), sortedUnits..., 총합계)
+    const unitSet = new Set<string>();
+    const pivotMap: { [baseName: string]: { [unit: string]: number } } = {};
+
+    orders.forEach(o => {
+      const unit = o.용량 || "기본";
+      const baseName = o.상품명 || "미분류";
+      unitSet.add(unit);
+
+      if (!pivotMap[baseName]) {
+        pivotMap[baseName] = {};
+      }
+      pivotMap[baseName][unit] = (pivotMap[baseName][unit] || 0) + (o.수량 * (o.multiplier || 1));
+    });
+
+    const sortedUnits = sortUnitsSmart(Array.from(unitSet));
+    const sortedBaseNames = Object.keys(pivotMap).sort();
+
+    const summarySheet2Columns = ["상품 분류 (행 레이블)", ...sortedUnits, "총합계"];
+    const summarySheet2Rows: (string | number)[][] = [];
+
+    sortedBaseNames.forEach(baseName => {
+      const rowData: (string | number)[] = [baseName];
+      let totalRowQty = 0;
+      sortedUnits.forEach(unit => {
+        const qty = pivotMap[baseName][unit] || 0;
+        rowData.push(qty > 0 ? qty : "");
+        totalRowQty += qty;
+      });
+      rowData.push(totalRowQty);
+      summarySheet2Rows.push(rowData);
+    });
+
+    // 하단 총합계 행
+    const totalRow: (string | number)[] = ["총합계"];
+    let grandTotal = 0;
+    sortedUnits.forEach(unit => {
+      let colTotal = 0;
+      sortedBaseNames.forEach(baseName => {
+        colTotal += pivotMap[baseName][unit] || 0;
+      });
+      totalRow.push(colTotal > 0 ? colTotal : "");
+      grandTotal += colTotal;
+    });
+    totalRow.push(grandTotal);
+    summarySheet2Rows.push(totalRow);
+
+    const summaryReportFile: ExcelPreviewFile = {
+      fileName: "1. 요약보고서.xlsx",
+      fileDescription: "상세내역 시트 및 상품준비요약(피벗 집계표) 시트로 구성된 엑셀 파일입니다.",
+      sheets: [
+        { sheetName: "상세내역", columns: summarySheet1Columns, rows: summarySheet1Rows },
+        { sheetName: "상품준비요약", columns: summarySheet2Columns, rows: summarySheet2Rows }
+      ],
+      onDownload: () => {
+        handleDownloadSummaryReport();
+      }
+    };
+
+    // --- [파일 2: 2. 품목별정렬.xlsx] ---
+    const sortedSheetColumns = ["용량", "상품명", "수량(고정)", "수량", "수령인", "연락처", "우편번호", "주소", "배송메시지"];
+    const sortedSheetRows = orders.map(o => [
+      o.originalOptionName || "",
+      o.originalProductName || "",
+      1,
+      o.수량,
+      o.수령인 || "",
+      o.연락처 || "",
+      o.우편번호 || "",
+      o.주소 || "",
+      o.배송메시지 || ""
+    ]);
+
+    const productSortedFile: ExcelPreviewFile = {
+      fileName: "2. 품목별정렬.xlsx",
+      fileDescription: "주소록 및 품목별 정렬이 완료된 원본 가공데이터 엑셀 파일입니다.",
+      sheets: [
+        { sheetName: "가공데이터", columns: sortedSheetColumns, rows: sortedSheetRows }
+      ],
+      onDownload: () => {
+        handleDownloadProductSorted();
+      }
+    };
+
+    setPreviewModal({
+      isOpen: true,
+      title: "1단계 가공 엑셀 파일 미리보기 (총 2개 파일)",
+      subtitle: "다운로드되는 실제 엑셀 파일 및 시트 구조와 100% 동일한 미리보기 화면입니다.",
+      files: [summaryReportFile, productSortedFile],
+      onDownloadAll: () => {
+        setPreviewModal(prev => ({ ...prev, isOpen: false }));
+        handleDownloadAllProcessed();
+      },
+      downloadAllButtonText: "두 파일 한 번에 모두 다운로드"
+    });
+  };
+
+  // 2단계 최종 운송장반영 배송엑셀 미리보기 (실제 다운로드되는 1개 파일과 100% 동일)
+  const handlePreviewStep2Excel = () => {
+    if (!trackingResult || !trackingResult.outputOrders || trackingResult.outputOrders.length === 0) {
+      showNotification('info', "미리볼 운송장 매칭 결과가 없습니다. 먼저 운송장 매칭을 실행해주세요.");
+      return;
+    }
+
+    const outputOrders: ProcessedOrder[] = trackingResult.outputOrders;
+    const effectiveCourier = selectedCourier === 'custom' ? customCourier : selectedCourier;
+
+    // 실제 파일 Sheet 1: 배송반영데이터 (단일 시트에 매칭상태 및 유추근거 열 포함)
+    const sheetColumns = [
+      "순번", "수령인", "우편번호", "주소", "연락처", "주문 품목명", "용량/옵션", "수량", "택배사", "운송장번호", "매칭상태", "지능형 매칭 유추 근거"
+    ];
+
+    const sheetRows = outputOrders.map((o, idx) => [
+      idx + 1,
+      o.수령인,
+      o.우편번호,
+      o.주소,
+      o.연락처,
+      o.originalProductName || o.상품명,
+      o.originalOptionName || o.용량,
+      o.수량,
+      o.courierName || effectiveCourier,
+      o.trackingNumber || "(미부여)",
+      o.matchType || "unmatched",
+      o.softMatchReason || (o.matchType === 'exact' ? '키 정보 100% 완전 일치' : '-')
+    ]);
+
+    const finalTrackingFile: ExcelPreviewFile = {
+      fileName: "최종_운송장반영_배송데이터.xlsx",
+      fileDescription: "운송장 번호가 매칭되어 부여된 최종 배송용 엑셀 파일입니다.",
+      sheets: [
+        { sheetName: "배송반영데이터", columns: sheetColumns, rows: sheetRows }
+      ],
+      onDownload: () => {
+        handleDownloadFinalTracking();
+      }
+    };
+
+    setPreviewModal({
+      isOpen: true,
+      title: "2단계 최종 운송장반영 배송엑셀 미리보기",
+      subtitle: "실제 다운로드되는 배송 엑셀 파일과 동일한 단일 시트 데이터입니다.",
+      files: [finalTrackingFile],
+      onDownloadAll: () => {
+        setPreviewModal(prev => ({ ...prev, isOpen: false }));
+        handleDownloadFinalTracking();
+      },
+      downloadAllButtonText: "최종 배송엑셀 파일 다운로드"
+    });
+  };
+
   // ----------------------------------------------------
   // 3. 2단계: 운송장 업데이트 핸들러
   // ----------------------------------------------------
@@ -478,9 +677,9 @@ export default function App() {
         const bestSheetName = findBestOrderSheet(workbook);
         const worksheet = workbook.Sheets[bestSheetName];
         const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: "" });
-        result = processTrackingUpdateWithRows(orderParseResult.orders, rawRows);
+        result = processTrackingUpdateWithRows(orderParseResult.orders, rawRows, productMappings);
       } else {
-        result = await processTrackingUpdate(orderParseResult.orders, sourceFile);
+        result = await processTrackingUpdate(orderParseResult.orders, sourceFile, productMappings);
       }
       setTrackingResult(result);
       showNotification('success', "운송장 일치 판별 및 자동 기입 처리가 완료되었습니다.");
@@ -575,7 +774,7 @@ export default function App() {
           const bestSheetName = findBestOrderSheet(workbook);
           const worksheet = workbook.Sheets[bestSheetName];
           const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: "" });
-          const result = processTrackingUpdateWithRows(orderParseResult.orders, rawRows);
+          const result = processTrackingUpdateWithRows(orderParseResult.orders, rawRows, productMappings);
           setTrackingResult(result);
           showNotification('success', "운송장 일치 판별 및 자동 기입 처리가 완료되었습니다.");
         } catch (matchErr: any) {
@@ -1010,6 +1209,14 @@ export default function App() {
                 </motion.div>
               )}
 
+              {/* 엑셀 파싱 필수 항목 유효성 검사 결과 대시보드 */}
+              {orderParseResult && (
+                <ExcelValidationDashboard
+                  validationIssues={orderParseResult.validationIssues || []}
+                  totalOrderCount={orderParseResult.orders.length}
+                />
+              )}
+
               {/* 원스톱 작업 패널 */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 
@@ -1104,7 +1311,7 @@ export default function App() {
                                   </select>
                                 </div>
                                 <button
-                                  onClick={() => handleRemoveOrderFile(idx)}
+                                  onClick={() => openConfirm("주문 파일 삭제", `"${file.name}" 업로드 파일을 목록에서 삭제하시겠습니까?`, () => handleRemoveOrderFile(idx))}
                                   className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded transition shrink-0 ml-1"
                                   title="파일 삭제"
                                 >
@@ -1168,29 +1375,39 @@ export default function App() {
 
                       <div className="bg-slate-50 rounded-xl p-4 border border-slate-150 space-y-3">
                         <div className="text-slate-700 font-bold text-[11px] mb-1">📥 가공 완료된 엑셀 파일 다운로드 (총 2종)</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div className="space-y-2">
                           <button
-                            onClick={handleDownloadSummaryReport}
-                            className="flex items-center justify-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
+                            onClick={handlePreviewStep1Excel}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition shadow-2xs cursor-pointer"
                           >
-                            <Download className="w-3.5 h-3.5" />
-                            1. 요약보고서 다운로드
+                            <Eye className="w-4 h-4 text-indigo-600" />
+                            👁️ 가공 엑셀 데이터 미리보기 (화면 확대 검수)
                           </button>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <button
+                              onClick={handleDownloadSummaryReport}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              1. 요약보고서 다운로드
+                            </button>
+                            <button
+                              onClick={handleDownloadProductSorted}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              2. 품목별정렬 다운로드
+                            </button>
+                          </div>
                           <button
-                            onClick={handleDownloadProductSorted}
-                            className="flex items-center justify-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition shadow-sm"
+                            onClick={handleDownloadAllProcessed}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition shadow-sm"
                           >
-                            <Download className="w-3.5 h-3.5" />
-                            2. 품목별정렬 다운로드
+                            <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                            두 개 파일 한 번에 모두 다운로드하기
                           </button>
                         </div>
-                        <button
-                          onClick={handleDownloadAllProcessed}
-                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition shadow-sm"
-                        >
-                          <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                          두 개 파일 한 번에 모두 다운로드하기
-                        </button>
                         <div id="iframe-download-tip-step1" className="bg-amber-50/70 border border-amber-150 rounded-lg p-3 flex items-start gap-2.5 text-[11px] text-amber-800 leading-relaxed">
                           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                           <div>
@@ -1306,6 +1523,13 @@ export default function App() {
                       {trackingResult && (
                         <div className="space-y-2 w-full">
                           <button
+                            onClick={handlePreviewStep2Excel}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition shadow-2xs cursor-pointer"
+                          >
+                            <Eye className="w-4 h-4 text-indigo-600" />
+                            👁️ 최종 운송장반영 엑셀 미리보기 (화면 확대 검수)
+                          </button>
+                          <button
                             onClick={handleDownloadFinalTracking}
                             className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium transition"
                           >
@@ -1343,8 +1567,8 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">운송장 매칭 통계 및 결과 보고서</h3>
                     <button
-                      onClick={handleResetProcess}
-                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1"
+                      onClick={() => openConfirm("작업 영역 리셋", "현재 작업 중인 주문 데이터 및 운송장 매칭 결과가 모두 초기화됩니다. 정말 리셋하시겠습니까?", handleResetProcess)}
+                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 transition"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       작업 영역 리셋하고 처음부터 하기
@@ -1357,6 +1581,7 @@ export default function App() {
                     unfilledErrors={trackingResult.unfilledErrors}
                     unusedErrors={trackingResult.unusedErrors}
                     totalInputRows={orderParseResult ? orderParseResult.orders.length : 0}
+                    outputOrders={trackingResult.outputOrders}
                   />
                 </div>
               )}
@@ -1421,7 +1646,6 @@ export default function App() {
               <ProductMappingList 
                 mappings={productMappings} 
                 onChange={setProductMappings} 
-                defaultRawNames={defaultRawNames}
               />
             </motion.div>
           )}
@@ -1506,6 +1730,17 @@ export default function App() {
 
         </AnimatePresence>
       </main>
+
+      {/* 엑셀 데이터 미리보기 모달 */}
+      <ExcelPreviewModal
+        isOpen={previewModal.isOpen}
+        onClose={() => setPreviewModal(prev => ({ ...prev, isOpen: false }))}
+        title={previewModal.title}
+        subtitle={previewModal.subtitle}
+        files={previewModal.files}
+        onDownloadAll={previewModal.onDownloadAll}
+        downloadAllButtonText={previewModal.downloadAllButtonText}
+      />
 
       {/* 하단 푸터 */}
       <footer id="main-footer" className="bg-slate-900 border-t border-slate-800 text-slate-500 py-3 text-center text-[10px] shrink-0 leading-relaxed">

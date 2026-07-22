@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PlatformConfig, ColumnMapping } from '../types';
 import { PLATFORM_PRESETS } from '../utils/defaultData';
-import { Plus, Trash2, Edit3, Settings, HelpCircle, Save, Undo, ShoppingBag } from 'lucide-react';
+import { Plus, Trash2, Edit3, Settings, HelpCircle, Save, Undo, ShoppingBag, AlertTriangle } from 'lucide-react';
 
 // Excel Column Letter to 1-based Number (e.g. "A" -> 1, "AA" -> 27)
 function letterToColNum(letter: string): number {
@@ -57,7 +57,7 @@ interface PlatformSettingsProps {
 export default function PlatformSettings({ platforms, onChange }: PlatformSettingsProps) {
   const [editingPlatform, setEditingPlatform] = useState<PlatformConfig | null>(null);
   const [showPresetModal, setShowPresetModal] = useState(false);
-  const [deletingPlatformId, setDeletingPlatformId] = useState<string | null>(null);
+  const [deletingPlatform, setDeletingPlatform] = useState<PlatformConfig | null>(null);
 
   // 1-based / 알파벳 열 입력을 위한 로컬 상태
   const [startRowInput, setStartRowInput] = useState<string>('');
@@ -139,7 +139,7 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
     if (editingPlatform?.id === id) {
       setEditingPlatform(null);
     }
-    setDeletingPlatformId(null);
+    setDeletingPlatform(null);
   };
 
   const applyPreset = (preset: typeof PLATFORM_PRESETS[0]) => {
@@ -256,6 +256,35 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
         </div>
       )}
 
+      {/* 플랫폼 삭제 확인 모달 팝업 */}
+      {deletingPlatform && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6 space-y-4 border border-slate-100">
+            <h3 className="font-bold text-slate-800 text-base flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0" />
+              연동 플랫폼 삭제 확인
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              <strong>"{deletingPlatform.name}"</strong> 플랫폼 설정을 목록에서 삭제하시겠습니까?
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setDeletingPlatform(null)}
+                className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition"
+              >
+                취소
+              </button>
+              <button
+                onClick={() => executeDeletePlatform(deletingPlatform.id)}
+                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold transition shadow-md"
+              >
+                삭제하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 리스트 및 편집 영역 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
@@ -294,41 +323,21 @@ export default function PlatformSettings({ platforms, onChange }: PlatformSettin
                     </p>
                   </div>
                   
-                  <div className="flex flex-col items-end gap-1">
-                    {deletingPlatformId === plat.id ? (
-                      <div className="flex items-center gap-1.5 animate-fade-in bg-rose-50/50 p-1 rounded-lg border border-rose-150">
-                        <span className="text-[10px] text-rose-500 font-bold whitespace-nowrap">삭제?</span>
-                        <button
-                          onClick={() => executeDeletePlatform(plat.id)}
-                          className="px-1.5 py-0.5 text-[10px] text-white bg-rose-500 hover:bg-rose-600 rounded font-bold"
-                        >
-                          예
-                        </button>
-                        <button
-                          onClick={() => setDeletingPlatformId(null)}
-                          className="px-1.5 py-0.5 text-[10px] text-slate-500 bg-slate-100 hover:bg-slate-200 rounded font-bold"
-                        >
-                          아니오
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => setEditingPlatform({ ...plat })}
-                          title="수정"
-                          className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-slate-50 rounded"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => setDeletingPlatformId(plat.id)}
-                          title="삭제"
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-slate-50 rounded"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setEditingPlatform({ ...plat })}
+                      title="수정"
+                      className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-slate-50 rounded transition"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setDeletingPlatform(plat)}
+                      title="삭제"
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-slate-50 rounded transition"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               </div>

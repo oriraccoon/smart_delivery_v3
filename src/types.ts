@@ -44,6 +44,31 @@ export interface ProcessedOrder {
   multiplier?: number;
   originalOptionName: string;
   originalProductName: string;
+  sourceFileName?: string;
+  platformName?: string;
+  platformId?: string;
+  validationIssues?: string[]; // 개별 주문의 누락 필드 목록
+  matchType?: 'exact' | 'soft' | 'unmatched';
+  softMatchReason?: string;
+}
+
+export interface ValidationIssue {
+  id: string;
+  rowIndex: number; // 엑셀 1-based 행 번호
+  fileName: string;
+  recipient: string;
+  productName: string;
+  address: string;
+  phone: string;
+  zipCode: string;
+  missingFields: string[]; // 예: ["수령인", "주소", "연락처"]
+}
+
+export interface ValidationReport {
+  totalRows: number;
+  validRows: number;
+  issueRows: number;
+  issues: ValidationIssue[];
 }
 
 export interface MatchingError {

@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { PlatformConfig, ProductMapping, ProcessedOrder, MatchingError, ColumnMapping } from '../types';
+import { PlatformConfig, ProductMapping, ProcessedOrder, MatchingError, ColumnMapping, ValidationIssue } from '../types';
 
 // ==========================================
 // 1. 텍스트 정제 및 정규화 유틸리티
@@ -470,6 +470,7 @@ export interface FileParseResult {
   rawRows: any[][];
   headers: any[];
   newRawItems: string[]; // 새로 발견되어 매핑이 필요한 원본 상품명들
+  validationIssues: ValidationIssue[]; // 필수 항목 누락/오류 검사 결과 목록
 }
 
 // 2-1. 복호화되거나 이미 읽어온 2차원 배열 데이터를 기반으로 플랫폼 자동 감지 및 가공 분석을 실행하는 핵심 로직
@@ -570,39 +571,92 @@ export function processRawRows(
     }
   });
 
-  // 주문 데이터 추출
+  // 주문 데이터 추출 및 필수 유효성 검사
   const orders: ProcessedOrder[] = [];
+  const validationIssues: ValidationIssue[] = [];
 
   for (let i = startRow; i < rawRows.length; i++) {
     const row = rawRows[i];
     if (!row) continue;
     if (isGuideRow(row)) continue; // 가이드 행 건너뛰기
 
-    const nameVal = String(row[colMap.수령인] || "").trim();
-    if (!nameVal || nameVal === "nan" || nameVal === "undefined") continue;
+    const rawRecipient = String(row[colMap.수령인] || "").trim();
+    const rawProdName = String(row[colMap.상품명] || "").trim();
+    const rawAddr = String(row[colMap.주소] || "").trim();
+    const rawPhone = String(row[colMap.연락처] || "").trim();
+    const rawZip = normalizeValueForMatching(row[colMap.우편번호]);
+    const rawQtyVal = row[colMap.수량];
+    const qtyNum = Number(rawQtyVal) || 0;
 
-    const rawProdName = String(row[colMap.상품명] || "");
+    // 완전히 빈 행(모든 주요 데이터가 비어있는 경우) 건너뛰기
+    const isCompletelyEmpty = (!rawRecipient || rawRecipient === "nan" || rawRecipient === "undefined") &&
+                              !rawProdName && !rawAddr && !rawPhone;
+    if (isCompletelyEmpty) continue;
+
+    // 필수 항목 검사
+    const missingFields: string[] = [];
+
+    if (!rawRecipient || rawRecipient === "nan" || rawRecipient === "undefined" || rawRecipient === "-") {
+      missingFields.push("수령인");
+    }
+
+    if (!rawAddr || rawAddr === "nan" || rawAddr === "undefined" || rawAddr === "-") {
+      missingFields.push("주소");
+    }
+
+    if (!rawPhone || rawPhone === "nan" || rawPhone === "undefined" || rawPhone === "-") {
+      missingFields.push("연락처");
+    }
+
+    if (!rawProdName || rawProdName === "nan" || rawProdName === "undefined") {
+      missingFields.push("상품명");
+    }
+
+    if (qtyNum <= 0) {
+      missingFields.push("수량");
+    }
+
+    if (!rawZip || rawZip === "nan" || rawZip === "undefined" || rawZip === "-") {
+      missingFields.push("우편번호");
+    }
+
+    const recipientName = rawRecipient && rawRecipient !== "nan" && rawRecipient !== "undefined" ? rawRecipient : "(수령인 미입력)";
     const originalUnit = String(row[colMap.용량] || "");
     
-    const { mappedName, matchedRawName } = extractOptionAndCleanName(rawProdName, productMap, originalUnit);
+    const { mappedName } = extractOptionAndCleanName(rawProdName, productMap, originalUnit);
     const { unitWeight, multiplier } = extractWeightAndMultiplier(rawProdName, originalUnit, mappedName);
     
-    const zipCode = normalizeValueForMatching(row[colMap.우편번호]);
-    const addr = String(row[colMap.주소] || "").trim();
-    const recipientName = String(row[colMap.수령인] || "").trim();
+    const zipCode = rawZip;
+    const addr = rawAddr;
     const ordererName = recipientName;
 
     const uniqueIdName = recipientName;
     const combinedId = `${uniqueIdName}_${zipCode}_${addr}`;
 
+    const excelRowIndex = i + 1; // 엑셀 실제 1-based 행 번호
+
+    if (missingFields.length > 0) {
+      validationIssues.push({
+        id: `val_${i}_${Date.now()}`,
+        rowIndex: excelRowIndex,
+        fileName: fileName,
+        recipient: recipientName,
+        productName: rawProdName || mappedName || "(상품명 미입력)",
+        address: addr || "(주소 미입력)",
+        phone: rawPhone || "(연락처 미입력)",
+        zipCode: zipCode || "(우편번호 미입력)",
+        missingFields: missingFields
+      });
+    }
+
     orders.push({
       id: String(i),
       용량: unitWeight,
       상품명: mappedName,
-      수량: Number(row[colMap.수량]) || 0,
+      수량: qtyNum,
       주문자: ordererName,
       수령인: recipientName,
-      연락처: String(row[colMap.연락처] || ""),
+      연락처: rawPhone,
       우편번호: zipCode,
       주소: addr,
       배송메시지: String(row[colMap.배송메시지] || ""),
@@ -611,7 +665,8 @@ export function processRawRows(
       isMulti: false,
       multiplier: multiplier,
       originalOptionName: originalUnit,
-      originalProductName: rawProdName
+      originalProductName: rawProdName,
+      validationIssues: missingFields.length > 0 ? missingFields : undefined
     });
   }
 
@@ -643,7 +698,8 @@ export function processRawRows(
     orders: sortedOrders,
     rawRows,
     headers: headerRow,
-    newRawItems
+    newRawItems,
+    validationIssues
   };
 }
 
@@ -998,10 +1054,72 @@ export function isSoftMatch(inKey: string[], srcKey: string[]): boolean {
   return nameMatch && prodMatch;
 }
 
+// 헬퍼: 상품명/옵션명 및 품목 대치(ProductMapping) 일치 검사
+function checkProductMatch(
+  sourceProd: string,     // 2단계 송장파일의 상품명
+  sourceUnit: string,     // 2단계 송장파일의 옵션/용량
+  oOriginalProd: string,  // 1단계 원본 상품명
+  oMappedProd: string,    // 1단계 매핑/표준 상품명
+  oOriginalOpt: string,   // 1단계 원본 옵션명
+  oMappedOpt: string,     // 1단계 매핑/표준 옵션명
+  mappings?: ProductMapping[]
+): { isMatch: boolean; reason: string } {
+  const sProd = String(sourceProd || "").replace(/\s+/g, "").toLowerCase();
+  const sUnit = String(sourceUnit || "").replace(/\s+/g, "").toLowerCase();
+  const origProd = String(oOriginalProd || "").replace(/\s+/g, "").toLowerCase();
+  const mappedProd = String(oMappedProd || "").replace(/\s+/g, "").toLowerCase();
+  const origOpt = String(oOriginalOpt || "").replace(/\s+/g, "").toLowerCase();
+  const mappedOpt = String(oMappedOpt || "").replace(/\s+/g, "").toLowerCase();
+
+  // 1) 텍스트 직접 일치 또는 부분 포함 일치
+  if (sProd && (
+    sProd === origProd ||
+    sProd === mappedProd ||
+    (origProd.length >= 2 && (sProd.includes(origProd) || origProd.includes(sProd))) ||
+    (mappedProd.length >= 2 && (sProd.includes(mappedProd) || mappedProd.includes(sProd)))
+  )) {
+    return { isMatch: true, reason: "상품명 텍스트 직접 일치" };
+  }
+
+  // 2) 옵션/용량 텍스트 일치
+  if (sUnit && (
+    sUnit === origOpt ||
+    sUnit === mappedOpt ||
+    (mappedOpt.length >= 2 && (sUnit.includes(mappedOpt) || mappedOpt.includes(sUnit))) ||
+    (origOpt.length >= 2 && (sUnit.includes(origOpt) || origOpt.includes(sUnit)))
+  )) {
+    return { isMatch: true, reason: "옵션/용량 텍스트 일치" };
+  }
+
+  // 3) 품목 대치 리스트(ProductMapping)를 통한 대치 교차 확인
+  if (mappings && mappings.length > 0 && (sProd || sUnit)) {
+    for (const m of mappings) {
+      const mOrig = String(m.rawName || "").replace(/\s+/g, "").toLowerCase();
+      const mMapped = String(m.mappedName || "").replace(/\s+/g, "").toLowerCase();
+
+      if (!mOrig && !mMapped) continue;
+
+      // 2단계 송장파일의 상품명이 대치 규칙의 원본/매핑 품목과 관계있는가?
+      const matchWithOrig = mOrig && (sProd.includes(mOrig) || mOrig.includes(sProd));
+      const matchWithMapped = mMapped && (sProd.includes(mMapped) || mMapped.includes(sProd));
+
+      if (matchWithOrig || matchWithMapped) {
+        // 대치 매핑 결과(mMapped)가 1단계 주문 데이터의 매핑 상품명(mappedProd) 또는 원본 상품명(origProd)과 일치하는가?
+        if (mMapped === mappedProd || mOrig === origProd || (mappedProd.length >= 2 && mMapped.includes(mappedProd))) {
+          return { isMatch: true, reason: `등록된 품목 대치 규칙 일치 (${m.rawName} -> ${m.mappedName})` };
+        }
+      }
+    }
+  }
+
+  return { isMatch: false, reason: "상품명 미일치" };
+}
+
 // 2-2. 복호화되거나 이미 읽어온 2차원 배열 데이터를 기반으로 운송장 소스 매칭 분석을 수행하는 로직
 export function processTrackingUpdateWithRows(
   inputOrders: ProcessedOrder[],
-  srcRows: any[][]
+  srcRows: any[][],
+  mappings?: ProductMapping[]
 ): TrackingUpdateResult {
   if (!srcRows || srcRows.length === 0) {
     return {
@@ -1186,83 +1304,77 @@ export function processTrackingUpdateWithRows(
     const oName = cleanStr(o.수령인);
     const oZip = cleanZip(o.우편번호);
     const oPhone = cleanPhone(o.연락처);
-    const oProd = cleanStr(o.originalProductName || o.상품명);
-    const oMappedProd = cleanStr(o.상품명);
-    const oOpt = cleanStr(o.originalOptionName || o.용량);
+    const oOrigProd = o.originalProductName || o.상품명 || "";
+    const oMappedProd = o.상품명 || "";
+    const oOrigOpt = o.originalOptionName || o.용량 || "";
+    const oMappedOpt = o.용량 || "";
     const oQty = Number(o.수량) || 1;
     const oAddr = cleanStr(o.주소);
 
     let matchedItem: SourceItem | null = null;
     let matchType: 'exact' | 'soft' = 'exact';
+    let softMatchReason = '';
 
-    // Tier 1: 이름 + 우편번호/전화번호 + 수량 + 품목/옵션 완벽 대조
+    // Tier 1: [100% 완전 매칭] 수령인 이름 + 식별정보(우편번호/전화번호/주소) + 수량 일치 + [상품명/품목대치 매핑 완벽 일치]
     for (const item of sourceItems) {
       if (item.used) continue;
       if (item.name && item.name === oName) {
-        const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
-        const qtyMatch = item.qty === oQty || !item.qty;
-        const prodMatch = !item.prod || item.prod.includes(oProd) || oProd.includes(item.prod) || item.prod.includes(oMappedProd) || oMappedProd.includes(item.prod) || item.unit.includes(oOpt) || oOpt.includes(item.unit);
+        const zipMatch = oZip && item.zip && oZip === item.zip;
+        const phoneMatch = oPhone && item.phone && oPhone === item.phone;
+        const addrMatch = oAddr && item.addr && (item.addr.includes(oAddr.slice(0, 8)) || oAddr.includes(item.addr.slice(0, 8)));
+        const infoMatch = zipMatch || phoneMatch || addrMatch;
+        const qtyMatch = !item.qty || item.qty === oQty;
 
-        if (zipOrPhoneMatch && qtyMatch && prodMatch) {
+        const prodCheck = checkProductMatch(item.prod, item.unit, oOrigProd, oMappedProd, oOrigOpt, oMappedOpt, mappings);
+
+        if (infoMatch && qtyMatch && prodCheck.isMatch) {
           matchedItem = item;
           matchType = 'exact';
+          softMatchReason = `수령인/연락처/수량 및 ${prodCheck.reason} 100% 완전 일치`;
           break;
         }
       }
     }
 
-    // Tier 2: 이름 + 우편번호/전화번호 + 수량 (품목명 오차 허용)
+    // Tier 2: [교차 검증 완전 매칭] 수령인 이름 + 식별정보 + 수량 일치 (택배사 송장의 상품명이 약식으로 표기된 경우)
     if (!matchedItem) {
       for (const item of sourceItems) {
         if (item.used) continue;
         if (item.name && item.name === oName) {
-          const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
-          const qtyMatch = item.qty === oQty || !item.qty;
+          const zipMatch = oZip && item.zip && oZip === item.zip;
+          const phoneMatch = oPhone && item.phone && oPhone === item.phone;
+          const addrMatch = oAddr && item.addr && (item.addr.includes(oAddr.slice(0, 8)) || oAddr.includes(item.addr.slice(0, 8)));
+          const infoMatch = zipMatch || phoneMatch || addrMatch;
+          const qtyMatch = !item.qty || item.qty === oQty;
 
-          if (zipOrPhoneMatch && qtyMatch) {
+          if (infoMatch && qtyMatch) {
             matchedItem = item;
-            matchType = 'soft';
+            matchType = 'exact';
+            softMatchReason = '수령인/배송지/수량 교차 완전 매칭 (택배사 상품명 약식 기재)';
             break;
           }
         }
       }
     }
 
-    // Tier 3: 이름 + 우편번호/전화번호
+    // Tier 3: [지능형 부분매칭] 수령인 이름 + [상품명/품목대치 매핑 일치] (우편번호/연락처 미입력 또는 오차)
     if (!matchedItem) {
       for (const item of sourceItems) {
         if (item.used) continue;
         if (item.name && item.name === oName) {
-          const zipOrPhoneMatch = (oZip && item.zip && oZip === item.zip) || (oPhone && item.phone && oPhone === item.phone);
+          const prodCheck = checkProductMatch(item.prod, item.unit, oOrigProd, oMappedProd, oOrigOpt, oMappedOpt, mappings);
 
-          if (zipOrPhoneMatch) {
+          if (prodCheck.isMatch) {
             matchedItem = item;
             matchType = 'soft';
+            softMatchReason = `수령인 및 ${prodCheck.reason} 기반 지능형 부분 매칭`;
             break;
           }
         }
       }
     }
 
-    // Tier 4: 이름 + 품목/옵션/주소 일부 일치
-    if (!matchedItem) {
-      for (const item of sourceItems) {
-        if (item.used) continue;
-        if (item.name && item.name === oName) {
-          const prodMatch = (item.prod && (item.prod.includes(oProd) || oProd.includes(item.prod) || item.prod.includes(oMappedProd))) ||
-                            (item.unit && (item.unit.includes(oOpt) || oOpt.includes(item.unit))) ||
-                            (item.addr && oAddr && (item.addr.includes(oAddr.slice(0, 6)) || oAddr.includes(item.addr.slice(0, 6))));
-
-          if (prodMatch) {
-            matchedItem = item;
-            matchType = 'soft';
-            break;
-          }
-        }
-      }
-    }
-
-    // Tier 5: 수령인 이름 고유 일치 (해당 수령인이 소스파일 및 주문서에 유일하게 존재하는 경우)
+    // Tier 4: [지능형 부분매칭] 고유 수령인 명의 1:1 유체 매칭 (동일 명의 주문이 양측에 유일 1건인 경우)
     if (!matchedItem) {
       const candidates = sourceItems.filter(item => !item.used && item.name && item.name === oName);
       const orderCountWithSameName = inputOrders.filter(ord => cleanStr(ord.수령인) === oName).length;
@@ -1270,12 +1382,15 @@ export function processTrackingUpdateWithRows(
       if (candidates.length === 1 && orderCountWithSameName === 1) {
         matchedItem = candidates[0];
         matchType = 'soft';
+        softMatchReason = '고유 수령인 명의 1:1 유체 매칭';
       }
     }
 
     if (matchedItem) {
       matchedItem.used = true;
       o.trackingNumber = matchedItem.trackingNumber;
+      o.matchType = matchType;
+      o.softMatchReason = softMatchReason;
       if (matchedItem.courierName) {
         o.courierName = matchedItem.courierName;
       }
@@ -1286,6 +1401,7 @@ export function processTrackingUpdateWithRows(
         softMatchCount++;
       }
     } else {
+      o.matchType = 'unmatched';
       unfilledErrors.push({
         type: 'unfilled',
         name: o.수령인,
@@ -1323,7 +1439,8 @@ export function processTrackingUpdateWithRows(
 
 export async function processTrackingUpdate(
   inputOrders: ProcessedOrder[],
-  sourceFile: File
+  sourceFile: File,
+  mappings?: ProductMapping[]
 ): Promise<TrackingUpdateResult> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1336,7 +1453,7 @@ export async function processTrackingUpdate(
         
         // 2차원 배열 데이터 로드
         const srcRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: "" });
-        const result = processTrackingUpdateWithRows(inputOrders, srcRows);
+        const result = processTrackingUpdateWithRows(inputOrders, srcRows, mappings);
         resolve(result);
       } catch (err: any) {
         const errMsg = err?.message || "";
